@@ -27,7 +27,7 @@ communication between servers by redis.
 
 ## Lock sequence
 
-![The lock sequence](./distlock/master/lock-sequence.png)
+![The lock sequence](https://raw.github.com/bdelbosc/distlock/master/lock-sequence.png)
 
 ## Websocket protocol
 Request and response are JSON encoded:
