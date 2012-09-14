@@ -27,7 +27,7 @@ communication between servers by redis.
 
 ## Lock sequence
 
-![The lock sequence](lock-sequence.png)
+![The lock sequence](./distlock/master/lock-sequence.png)
 
 ## Websocket protocol
 Request and response are JSON encoded:
@@ -61,13 +61,11 @@ Status:
 1. Get the [latest tomcat 7](http://tomcat.apache.org/download-70.cgi).
 2. Build:
 
-    mvn clean package
+         mvn clean package
      
-
 3. Deploy:
 
-    cp ./target/distlock.war $TOMCAT/webapps/ && $TOMCAT/bin/startup.sh
-
+         cp ./target/distlock.war $TOMCAT/webapps/ && $TOMCAT/bin/startup.sh
 
 4. Test using [http://localhost:8080/distlock/](http://localhost:8080/distlock/)
 
@@ -80,8 +78,9 @@ This requires to install:
 - [funkload](http://funkload.nuxeo.com/install.html) 
 - [Websocket for python](https://github.com/Lawouach/WebSocket-for-Python.git).
 
-    # test with 10 clients
-    cd ftest/funkload && fl-run-bench test_Distlock.py Distlock.test_distlock -c 10
+Test with 10 clients:
+
+        cd ftest/funkload && fl-run-bench test_Distlock.py Distlock.test_distlock -c 10
 
 
 ## References
