@@ -1,0 +1,62 @@
+@startuml
+hide footbox
+title Distributed lock
+
+box "Browsers" #Yellow
+   participant "Browser 1" as B1
+   participant "Browser 2" as B2
+end box
+box "Tomcat server" #LightBlue
+   participant "Tomcat 1" as N1
+   participant "Tomcat 2" as N2
+end box
+box "Redis" #LightRed
+   participant "Redis" as R
+end box
+
+== Tomcat startup ==
+N1 -> R  : Listen to unlock event
+note right: SUBSCRIBE /unlock
+N2 -> R  : Listen to unlock event
+note right: SUBSCRIBE /unlock
+
+== Open session ==
+B1 -> N1 : Open session S1
+B2 -> N2 : Open session S2
+== Locks  ==
+B1 -> N1 : Lock FOO
+N1 -> R  : Lock FOO
+note right: SETNX FOO=S1
+R -> N1  : OK
+N1 -> B1 : OK
+
+B2 -> N2 : Lock FOO
+N2 -> R  : Lock FOO
+note right: SETNX FOO=S2, Fail
+R -> N2  : FAIL
+N2 -> B2 : FAIL WAIT
+
+B1 -> N1 : Unlock FOO
+N1 -> R  : Remove Lock FOO
+note right: WATCH FOO\nIF FOO=S1 THEN DEL FOO\nEXEC
+
+R -> N1  : OK
+N1 -> B1 : Unlocked
+N1 -> R  : notify FOO unlocked
+note right: PUBLISH /unlock FOO
+
+R -> N1  : notification FOO unlocked
+R -> N2  : notification FOO unlocked
+
+N2 -> B2 : Retry lock FOO
+
+B2 -> N2 : Lock FOO
+N2 -> R  : Lock FOO
+R -> N2  : OK
+N2 -> B2 : OK
+
+== Close session ==
+B2 -> N2 : Close session S2
+N2 -> R : unlock FOO
+
+@enduml
