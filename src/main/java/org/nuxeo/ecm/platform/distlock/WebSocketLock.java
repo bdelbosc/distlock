@@ -21,7 +21,7 @@ import java.util.Date;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.atmosphere.config.service.WebSocketHandlerService;
-import org.atmosphere.cpr.AtmosphereResource;
+import org.atmosphere.cpr.AtmosphereResponse;
 import org.atmosphere.websocket.WebSocket;
 import org.atmosphere.websocket.WebSocketHandler;
 import org.codehaus.jackson.JsonParseException;
@@ -34,8 +34,7 @@ import redis.clients.jedis.Transaction;
 import redis.clients.jedis.exceptions.JedisException;
 
 /**
- * {@link WebSocketHandler} that implement the logic to build a
- * Distributed lock
+ * {@link WebSocketHandler} that implement the logic to build a Distributed lock
  *
  */
 @WebSocketHandlerService
@@ -80,121 +79,136 @@ public class WebSocketLock extends WebSocketHandler {
             log.error(e.getMessage(), e);
             return;
         }
+        String action = req.action;
         Jedis jedis = pool.getResource();
         try {
-            processAction(webSocket, req, jedis);
+            if (DistLock.ACTION_LOCK.equals(action)) {
+                lock(webSocket, req, jedis);
+            } else if (DistLock.ACTION_UNLOCK.equals(action)) {
+                unlock(webSocket, req, jedis);
+            } else if (DistLock.ACTION_CONNECT.equals(req.action)) {
+                connect(webSocket, req, jedis);
+            } else if (DistLock.ACTION_CLOSE.equals(req.action)) {
+                close(webSocket, req, jedis);
+            } else {
+                log.error("Unknown action: " + action);
+            }
         } finally {
             pool.returnResource(jedis);
         }
     }
 
-    private void processAction(WebSocket webSocket, Request req, Jedis jedis) {
+    private void close(WebSocket webSocket, Request req, Jedis jedis) {
+        String sid = req.param;
+        String cid = webSocket.resource().uuid(); // connection id
+        AtmosphereResponse resp = webSocket.resource().getResponse();
+        jedis.del(sid);
+        jedis.del(cid);
+        resp.write(new Response(DistLock.MSG_OK, "Close session: " + sid).toString());
+        // TODO: remove all lock with value sessionid
+    }
 
-        AtmosphereResource r = webSocket.resource();
-        String action = req.action;
-        String cid = r.uuid(); // connection id
-        String sid = jedis.get(cid); // user session id
+    private void connect(WebSocket webSocket, Request req, Jedis jedis) {
+        String sid = req.param;
+        String cid = webSocket.resource().uuid(); // connection id
+        AtmosphereResponse resp = webSocket.resource().getResponse();
+        jedis.set(sid, cid);
+        jedis.set(cid, sid);
+        resp.write(new Response(DistLock.MSG_OK, "Open session: " + sid).toString());
+    }
+
+    private void unlock(WebSocket webSocket, Request req, Jedis jedis) {
+        String cid = webSocket.resource().uuid(); // connection id
+        AtmosphereResponse resp = webSocket.resource().getResponse();
+        String sid = getSessionId(jedis, cid); // user session id
+        if (sid == null) {
+            resp.write(new Response(DistLock.MSG_FAIL, "Not sid, connect first").toString());
+            return;
+        }
+        String lockname = req.param;
+        log.debug("Try Unlock" + lockname);
+        String key = DistLock.LOCK_PREFFIX + lockname;
+        jedis.watch(key);
+        String owner = jedis.get(key);
+        if (sid.equals(owner)) {
+            Transaction t = jedis.multi();
+            t.del(key);
+            try {
+                t.exec();
+            } catch (JedisException e) {
+                log.error("Failed to unlock " + lockname, e);
+                resp.write(new Response(DistLock.MSG_FAIL,
+                        "Transaction failed during unlock: " + e.getMessage()).toString());
+                return;
+            }
+            log.debug("Unlock " + lockname + " done");
+        } else {
+            log.debug("lock owned by " + owner + " not " + sid);
+            resp.write(new Response(DistLock.MSG_FAIL, "lock owned by " + owner).toString());
+            jedis.unwatch();
+            return;
+        }
+        jedis.unwatch();
+
+        resp.write(new Response(DistLock.MSG_OK, "Unlocked " + lockname).toString());
+        jedis.publish(DistLock.UNLOCKED_CHANNEL, lockname);
+
+        // TODO: code to move to the subscriber
+    }
+
+    private boolean lock(WebSocket webSocket, Request req, Jedis jedis) {
+        String cid = webSocket.resource().uuid(); // connection id
+        AtmosphereResponse resp = webSocket.resource().getResponse();
+        String sid = getSessionId(jedis, cid); // user session id
+        if (sid == null) {
+            resp.write(new Response(DistLock.MSG_FAIL, "Not sid, connect first").toString());
+            return false;
+        }
+        String lockname = req.param;
+        log.debug("Try lock: " + lockname);
+        String key = DistLock.LOCK_PREFFIX + lockname;
+        if (jedis.setnx(key, sid) == 1) {
+            // Acquire lock
+            jedis.expire(key, DistLock.EXPIRES_LOCK);
+            resp.write(new Response(DistLock.MSG_OK, "Acquired").toString());
+            log.debug("Lock set on " + key + " by " + sid + "/" + cid);
+            return true;
+        }
+        String owner = jedis.get(key);
+        if (sid.equals(owner)) {
+            // Already acquire
+            jedis.expire(key, DistLock.EXPIRES_LOCK);
+            log.debug("Already got the lock on " + key);
+            resp.write(new Response(DistLock.MSG_OK, "Already own the lock").toString());
+            return true;
+        }
+        if (jedis.ttl(key) == -1) {
+            // paranoid check
+            jedis.expire(key, DistLock.EXPIRES_LOCK);
+        }
+        // lock wait
+        key = DistLock.WAIT_PREFFIX + lockname;
+        jedis.sadd(key, sid);
+        resp.write(new Response(DistLock.MSG_WAIT, "Lock owned by " + owner).toString());
+        log.debug("Lock " + key + " owned by " + owner + ", " + sid
+                + " waiting.");
+        return false;
+    }
+
+    private String getSessionId(Jedis jedis, String cid) {
+        String sid = jedis.get(cid);
         if (DistLock.NIL.equals(sid)) {
             sid = null;
         }
-        if (DistLock.ACTION_LOCK.equals(req.action)) {
-            if (sid == null) {
-                r.getResponse().write(
-                        new Response(DistLock.MSG_FAIL,
-                                "Not sid, connect first").toString());
-                return;
-            }
-            String lockname = req.param;
-            log.debug("Try lock: " + lockname);
-            String key = DistLock.LOCK_PREFFIX + lockname;
-            if (jedis.setnx(key, sid) == 1) {
-                // Acquire lock
-                jedis.expire(key, DistLock.EXPIRES_LOCK);
-                r.getResponse().write(
-                        new Response(DistLock.MSG_OK, "Acquired").toString());
-                log.debug("Lock set on " + key + " by " + sid + "/" + cid);
-                return;
-            }
-            String owner = jedis.get(key);
-            if (sid.equals(owner)) {
-                // Already acquire
-                jedis.expire(key, DistLock.EXPIRES_LOCK);
-                log.debug("Already got the lock on " + key);
-                r.getResponse().write(
-                        new Response(DistLock.MSG_OK, "Already own the lock").toString());
-                return;
-            }
-            if (jedis.ttl(key) == -1) {
-                // paranoid check
-                jedis.expire(key, DistLock.EXPIRES_LOCK);
-            }
-            // lock wait
-            key = DistLock.WAIT_PREFFIX + lockname;
-            jedis.sadd(key, sid);
-            r.getResponse().write(
-                    new Response(DistLock.MSG_WAIT, "Lock owned by " + owner).toString());
-            log.debug("Lock " + key + " owned by " + owner + ", " + sid
-                    + " waiting.");
-        } else if (DistLock.ACTION_UNLOCK.equals(action)) {
-            if (sid == null) {
-                r.getResponse().write(
-                        new Response(DistLock.MSG_FAIL,
-                                "Not sid, connect first").toString());
-                return;
-            }
-            String lockname = req.param;
-            log.debug("Try Unlock" + lockname);
-            String key = DistLock.LOCK_PREFFIX + lockname;
-            jedis.watch(key);
-            String owner = jedis.get(key);
-            if (sid.equals(owner)) {
-                Transaction t = jedis.multi();
-                t.del(key);
-                try {
-                    t.exec();
-                } catch (JedisException e) {
-                    log.error("Failed to unlock " + lockname, e);
-                    r.getResponse().write(
-                            new Response(DistLock.MSG_FAIL,
-                                    "Transaction failed during unlock: "
-                                            + e.getMessage()).toString());
-                    return;
-                }
-                log.debug("Unlock " + lockname + " done");
-            } else {
-                log.debug("lock owned by " + owner + " not " + sid);
-                r.getResponse().write(
-                        new Response(DistLock.MSG_FAIL, "lock owned by "
-                                + owner).toString());
-                jedis.unwatch();
-                return;
-            }
-            jedis.unwatch();
+        return sid;
+    }
 
-            r.getResponse().write(
-                    new Response(DistLock.MSG_OK, "Unlocked " + lockname).toString());
-
-            jedis.publish(DistLock.UNLOCKED_CHANNEL, lockname);
-
-            // TODO: code to move to the subscriber
-
-        } else if (DistLock.ACTION_CONNECT.equals(req.action)) {
-            sid = req.param;
-            jedis.set(sid, cid);
-            jedis.set(cid, sid);
-            r.getResponse().write(
-                    new Response(DistLock.MSG_OK, "Open session: " + sid).toString());
-        } else if (DistLock.ACTION_CLOSE.equals(req.action)) {
-            sid = req.param;
-            jedis.del(sid);
-            jedis.del(cid);
-            r.getResponse().write(
-                    new Response(DistLock.MSG_OK, "Close session: " + sid).toString());
-            // TODO: remove all lock with value sessionid
-        } else {
-            log.error("Unknown action: " + action);
+    private String getConnectionId(Jedis jedis, String sid) {
+        String cid = jedis.get(sid);
+        if (DistLock.NIL.equals(cid)) {
+            cid = null;
         }
-
+        return cid;
     }
 
     public final static class Request {

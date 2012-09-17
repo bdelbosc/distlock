@@ -68,6 +68,7 @@ class Distlock(FunkLoadTestCase):
         ws.connect()
         while (ws.loop):
            sleep(1)
+        ws.close()
         # end of test -----------------------------------------------
 
     def tearDown(self):
