@@ -16,10 +16,15 @@ $(function () {
     var connect = $('#connect');
     var unlock = $('#unlock');
     var lock = $('#lock');
+    var minput = $('#minput');
+    var munlock = $('#munlock');
+    var mlock = $('#mlock');
 
     var myName = "anonymous";
     var logged = false;
     var socket = $.atmosphere;
+
+    var rsep = new RegExp("[ ,;]+", "g");
 
     // We are now ready to cut the request
     var request = { url: document.location.toString() + 'lock',
@@ -75,7 +80,8 @@ $(function () {
 	if (logged) {
 	    // logout
    	    addMessage(new Date(), "Logout " + myName, 'blue');
-            subSocket.push(jQuery.stringifyJSON({ action: 'close', param: myName }));
+	    var params = [myName];
+            subSocket.push(jQuery.stringifyJSON({ action: 'close', params: params }));
 	    login.val('').focus();
 	    myName = 'anonymous';
             status.text('Choose name:');
@@ -92,7 +98,8 @@ $(function () {
         myName = msg;
 	logged = true;
 	addMessage(new Date(), "Auth " + myName, 'blue');
-        subSocket.push(jQuery.stringifyJSON({ action: 'connect', param: myName }));
+	var params = [myName];
+        subSocket.push(jQuery.stringifyJSON({ action: 'connect', params: params }));
 	status.text(myName + ': ').css('color', 'blue');
 	connect.val('Close');
 	return false;
@@ -104,8 +111,9 @@ $(function () {
             alert("Please enter a lock name");
             return;
         }
+	var params = [msg];
 	addMessage(new Date(), "TRY LOCK " + msg, 'blue');
-        subSocket.push(jQuery.stringifyJSON({ action: 'lock', param: msg }));
+        subSocket.push(jQuery.stringifyJSON({ action: 'lock', params: params }));
     });
 
     unlock.click(function() {
@@ -114,9 +122,33 @@ $(function () {
             alert("Please enter a lock name");
             return;
         }
+	var params = [msg];
 	addMessage(new Date(), "TRY UNLOCK " + msg, 'blue');
-        subSocket.push(jQuery.stringifyJSON({ action: 'unlock', param: msg }));
+        subSocket.push(jQuery.stringifyJSON({ action: 'unlock', params: params }));
     });
+
+    mlock.click(function() {
+        var msg = minput.val();
+        if (msg == '') {
+            alert("Please enter a lock name");
+            return;
+        }
+	var params = msg.split(rsep);
+	addMessage(new Date(), "TRY MLOCK " + msg, 'blue');
+        subSocket.push(jQuery.stringifyJSON({ action: 'mlock', params: params }));
+    });
+
+    munlock.click(function() {
+        var msg = minput.val();
+        if (msg == '') {
+            alert("Please enter a lock name");
+            return;
+        }
+	var params = msg.split(rsep);
+	addMessage(new Date(), "TRY MUNLOCK " + msg, 'blue');
+        subSocket.push(jQuery.stringifyJSON({ action: 'munlock', params: params }));
+    });
+
 
     function addMessage(datetime, message, color) {
         content.prepend('<p><span style="color: ' + color + '">' + 

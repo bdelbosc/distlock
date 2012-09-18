@@ -35,6 +35,10 @@ public class DistLock {
 
     public static final String ACTION_UNLOCK = "unlock";
 
+    public static final String ACTION_MLOCK = "mlock";
+
+    public static final String ACTION_MUNLOCK = "munlock";
+
     public static final String WAIT_PREFFIX = "w-";
 
     public static final String LOCK_PREFFIX = "l-";

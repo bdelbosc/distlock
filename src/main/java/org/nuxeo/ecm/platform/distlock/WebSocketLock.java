@@ -1,22 +1,9 @@
-/*
- * Copyright 2012 Jeanfrancois Arcand
- *
- * Licensed under the Apache License, Version 2.0 (the "License"); you may not
- * use this file except in compliance with the License. You may obtain a copy of
- * the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations under
- * the License.
- */
 package org.nuxeo.ecm.platform.distlock;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Date;
+import java.util.List;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -60,6 +47,7 @@ public class WebSocketLock extends WebSocketHandler {
         log.debug("Closed");
     }
 
+    @Override
     public void onTextMessage(WebSocket webSocket, String message) {
         log.debug("onTextMessage " + webSocket.resource().uuid() + " "
                 + message);
@@ -86,6 +74,10 @@ public class WebSocketLock extends WebSocketHandler {
                 lock(webSocket, req, jedis);
             } else if (DistLock.ACTION_UNLOCK.equals(action)) {
                 unlock(webSocket, req, jedis);
+            } else if (DistLock.ACTION_MLOCK.equals(action)) {
+                mlock(webSocket, req, jedis);
+            } else if (DistLock.ACTION_MUNLOCK.equals(action)) {
+                munlock(webSocket, req, jedis);
             } else if (DistLock.ACTION_CONNECT.equals(req.action)) {
                 connect(webSocket, req, jedis);
             } else if (DistLock.ACTION_CLOSE.equals(req.action)) {
@@ -98,62 +90,31 @@ public class WebSocketLock extends WebSocketHandler {
         }
     }
 
+    // -----------------------------------------------------------
+    // DistLock API
+    private void connect(WebSocket webSocket, Request req, Jedis jedis) {
+        String sid = req.getParam();
+        String cid = webSocket.resource().uuid(); // connection id
+        AtmosphereResponse resp = webSocket.resource().getResponse();
+        jedis.set(sid, cid);
+        jedis.set(cid, sid);
+        resp.write(new Response(DistLock.MSG_OK, "Open session: " + sid).toString());
+        if (log.isDebugEnabled()) {
+            log.debug("Session opened: " + sid + "/" + cid);
+        }
+    }
+
     private void close(WebSocket webSocket, Request req, Jedis jedis) {
-        String sid = req.param;
+        String sid = req.getParam();
         String cid = webSocket.resource().uuid(); // connection id
         AtmosphereResponse resp = webSocket.resource().getResponse();
         jedis.del(sid);
         jedis.del(cid);
         resp.write(new Response(DistLock.MSG_OK, "Close session: " + sid).toString());
         // TODO: remove all lock with value sessionid
-    }
-
-    private void connect(WebSocket webSocket, Request req, Jedis jedis) {
-        String sid = req.param;
-        String cid = webSocket.resource().uuid(); // connection id
-        AtmosphereResponse resp = webSocket.resource().getResponse();
-        jedis.set(sid, cid);
-        jedis.set(cid, sid);
-        resp.write(new Response(DistLock.MSG_OK, "Open session: " + sid).toString());
-    }
-
-    private void unlock(WebSocket webSocket, Request req, Jedis jedis) {
-        String cid = webSocket.resource().uuid(); // connection id
-        AtmosphereResponse resp = webSocket.resource().getResponse();
-        String sid = getSessionId(jedis, cid); // user session id
-        if (sid == null) {
-            resp.write(new Response(DistLock.MSG_FAIL, "Not sid, connect first").toString());
-            return;
+        if (log.isDebugEnabled()) {
+            log.debug("Sesison closed: " + sid + "/" + cid);
         }
-        String lockname = req.param;
-        log.debug("Try Unlock" + lockname);
-        String key = DistLock.LOCK_PREFFIX + lockname;
-        jedis.watch(key);
-        String owner = jedis.get(key);
-        if (sid.equals(owner)) {
-            Transaction t = jedis.multi();
-            t.del(key);
-            try {
-                t.exec();
-            } catch (JedisException e) {
-                log.error("Failed to unlock " + lockname, e);
-                resp.write(new Response(DistLock.MSG_FAIL,
-                        "Transaction failed during unlock: " + e.getMessage()).toString());
-                return;
-            }
-            log.debug("Unlock " + lockname + " done");
-        } else {
-            log.debug("lock owned by " + owner + " not " + sid);
-            resp.write(new Response(DistLock.MSG_FAIL, "lock owned by " + owner).toString());
-            jedis.unwatch();
-            return;
-        }
-        jedis.unwatch();
-
-        resp.write(new Response(DistLock.MSG_OK, "Unlocked " + lockname).toString());
-        jedis.publish(DistLock.UNLOCKED_CHANNEL, lockname);
-
-        // TODO: code to move to the subscriber
     }
 
     private boolean lock(WebSocket webSocket, Request req, Jedis jedis) {
@@ -164,21 +125,26 @@ public class WebSocketLock extends WebSocketHandler {
             resp.write(new Response(DistLock.MSG_FAIL, "Not sid, connect first").toString());
             return false;
         }
-        String lockname = req.param;
-        log.debug("Try lock: " + lockname);
+        String lockname = req.getParam();
+        if (log.isDebugEnabled()) {
+            log.debug(sid + " try locking: " + lockname);
+        }
         String key = DistLock.LOCK_PREFFIX + lockname;
         if (jedis.setnx(key, sid) == 1) {
-            // Acquire lock
             jedis.expire(key, DistLock.EXPIRES_LOCK);
+            if (log.isDebugEnabled()) {
+                log.debug(sid + " locked: " + lockname);
+            }
             resp.write(new Response(DistLock.MSG_OK, "Acquired").toString());
-            log.debug("Lock set on " + key + " by " + sid + "/" + cid);
             return true;
         }
         String owner = jedis.get(key);
         if (sid.equals(owner)) {
             // Already acquire
             jedis.expire(key, DistLock.EXPIRES_LOCK);
-            log.debug("Already got the lock on " + key);
+            if (log.isDebugEnabled()) {
+                log.debug(sid + " already locked: " + lockname);
+            }
             resp.write(new Response(DistLock.MSG_OK, "Already own the lock").toString());
             return true;
         }
@@ -189,12 +155,181 @@ public class WebSocketLock extends WebSocketHandler {
         // lock wait
         key = DistLock.WAIT_PREFFIX + lockname;
         jedis.sadd(key, sid);
+        if (log.isDebugEnabled()) {
+            log.debug(sid + " waiting for lock: " + lockname + " owned by "
+                    + owner);
+        }
         resp.write(new Response(DistLock.MSG_WAIT, "Lock owned by " + owner).toString());
-        log.debug("Lock " + key + " owned by " + owner + ", " + sid
-                + " waiting.");
         return false;
     }
 
+    private boolean unlock(WebSocket webSocket, Request req, Jedis jedis) {
+        String cid = webSocket.resource().uuid(); // connection id
+        AtmosphereResponse resp = webSocket.resource().getResponse();
+        String sid = getSessionId(jedis, cid); // user session id
+        if (sid == null) {
+            resp.write(new Response(DistLock.MSG_FAIL, "Not sid, connect first").toString());
+            return false;
+        }
+        String lockname = req.getParam();
+        if (log.isDebugEnabled()) {
+            log.debug(sid + " try unlocking: " + lockname);
+        }
+        String key = DistLock.LOCK_PREFFIX + lockname;
+        jedis.watch(key);
+        String owner = jedis.get(key);
+        if (sid.equals(owner)) {
+            Transaction t = jedis.multi();
+            t.del(key);
+            try {
+                t.exec();
+            } catch (JedisException e) {
+                log.error(sid + " failed to unlock " + lockname, e);
+                resp.write(new Response(DistLock.MSG_FAIL,
+                        "Transaction failed during unlock: " + e.getMessage()).toString());
+                return false;
+            }
+        } else {
+            if (log.isDebugEnabled()) {
+                log.debug(sid + " can not unlock " + lockname + " owned by "
+                        + owner);
+            }
+            resp.write(new Response(DistLock.MSG_FAIL, "lock owned by " + owner).toString());
+            jedis.unwatch();
+            return false;
+        }
+        jedis.unwatch();
+        if (log.isDebugEnabled()) {
+            log.debug(sid + " unlocked: " + lockname);
+        }
+        resp.write(new Response(DistLock.MSG_OK, "Unlocked " + lockname).toString());
+        jedis.publish(DistLock.UNLOCKED_CHANNEL, lockname);
+        return true;
+    }
+
+    private boolean mlock(WebSocket webSocket, Request req, Jedis jedis) {
+        String cid = webSocket.resource().uuid(); // connection id
+        AtmosphereResponse resp = webSocket.resource().getResponse();
+        String sid = getSessionId(jedis, cid); // user session id
+        if (sid == null) {
+            resp.write(new Response(DistLock.MSG_FAIL, "Not sid, connect first").toString());
+            return false;
+        }
+        String[] locknames = req.getParams();
+        if (log.isDebugEnabled()) {
+            log.debug(sid + " try mlocking: " + Arrays.toString(locknames));
+        }
+        String[] keysvalues = new String[2 * locknames.length];
+        String[] keys = new String[locknames.length];
+        for (int i = 0; i < locknames.length; i++) {
+            keysvalues[2 * i] = DistLock.LOCK_PREFFIX + locknames[i];
+            keysvalues[2 * i + 1] = sid;
+            keys[i] = DistLock.LOCK_PREFFIX + locknames[i];
+        }
+        if (jedis.msetnx(keysvalues) == 1) {
+            // TODO pipeline all cmd
+            for (String key : keys) {
+                jedis.expire(key, DistLock.EXPIRES_LOCK);
+            }
+            if (log.isDebugEnabled()) {
+                log.debug(sid + " mlocked: " + Arrays.toString(locknames));
+            }
+            resp.write(new Response(DistLock.MSG_OK, "Acquired").toString());
+            return true;
+        }
+        List<String> owners = jedis.mget(keys);
+        String owner = null;
+        for (String item : owners) {
+            if (item != null && !sid.equals(item)) {
+                owner = item;
+                break;
+            }
+        }
+        if (owner == null) {
+            for (String key : keys) {
+                jedis.expire(key, DistLock.EXPIRES_LOCK);
+            }
+            if (log.isDebugEnabled()) {
+                log.debug(sid + " already mlocked: "
+                        + Arrays.toString(locknames));
+            }
+            resp.write(new Response(DistLock.MSG_OK, "Already own the lock").toString());
+            return true;
+        }
+        for (String key : keys) {
+            // paranoid check
+            if (jedis.ttl(key) == -1) {
+                jedis.expire(key, DistLock.EXPIRES_LOCK);
+            }
+        }
+        // lock wait
+        for (String lockname : locknames) {
+            jedis.sadd(DistLock.WAIT_PREFFIX + lockname, sid);
+        }
+        if (log.isDebugEnabled()) {
+            log.debug(sid + " wait for mlock: " + Arrays.toString(locknames)
+                    + " some are owned by " + owner);
+        }
+        resp.write(new Response(DistLock.MSG_WAIT, "Lock owned by " + owner).toString());
+        return false;
+    }
+
+    private boolean munlock(WebSocket webSocket, Request req, Jedis jedis) {
+        String cid = webSocket.resource().uuid(); // connection id
+        AtmosphereResponse resp = webSocket.resource().getResponse();
+        String sid = getSessionId(jedis, cid); // user session id
+        if (sid == null) {
+            resp.write(new Response(DistLock.MSG_FAIL, "Not sid, connect first").toString());
+            return false;
+        }
+        String[] locknames = req.getParams();
+        if (log.isDebugEnabled()) {
+            log.debug(sid + " try munlocking: " + Arrays.toString(locknames));
+        }
+        String[] keys = new String[locknames.length];
+        for (int i = 0; i < locknames.length; i++) {
+            keys[i] = DistLock.LOCK_PREFFIX + locknames[i];
+        }
+        jedis.watch(keys);
+        List<String> owners = jedis.mget(keys);
+        for (String owner : owners) {
+            if (!sid.equals(owner)) {
+                if (log.isDebugEnabled()) {
+                    log.debug(sid + " can not munlock "
+                            + Arrays.toString(locknames)
+                            + " some are owned by " + owner);
+                }
+                resp.write(new Response(DistLock.MSG_FAIL,
+                        "Can not munlock, some are owned by " + owner).toString());
+                jedis.unwatch();
+                return false;
+            }
+        }
+        Transaction t = jedis.multi();
+        t.del(keys);
+        try {
+            t.exec();
+        } catch (JedisException e) {
+            log.error("Failed to munlock " + Arrays.toString(locknames), e);
+            resp.write(new Response(DistLock.MSG_FAIL,
+                    "Transaction failed during unlock: " + e.getMessage()).toString());
+            return false;
+        }
+        jedis.unwatch();
+        if (log.isDebugEnabled()) {
+            log.debug(sid + " munlocked: " + Arrays.toString(locknames));
+        }
+        resp.write(new Response(DistLock.MSG_OK, "MUnlocked "
+                + Arrays.toString(locknames)).toString());
+        for (String lockname : locknames) {
+            jedis.publish(DistLock.UNLOCKED_CHANNEL, lockname);
+        }
+        return true;
+
+    }
+
+    // -----------------------------------------------------------
+    // Helpers
     private String getSessionId(Jedis jedis, String cid) {
         String sid = jedis.get(cid);
         if (DistLock.NIL.equals(sid)) {
@@ -212,19 +347,26 @@ public class WebSocketLock extends WebSocketHandler {
     }
 
     public final static class Request {
-
         public String action;
 
-        public String param;
+        public String[] params;
+
+        public String getParam() {
+            return params[0];
+        }
+
+        public String[] getParams() {
+            return params;
+        }
 
         public String toString() {
-            return "{ \"action\" : \"" + action + "\", \"param\" : \"" + param
-                    + "\" , \"time\" : " + new Date().getTime() + "}";
+            return "{ \"action\" : \"" + action + "\", \"param\" : \""
+                    + getParam() + "\" , \"time\" : " + new Date().getTime()
+                    + "}";
         }
     }
 
     public final static class Response {
-
         public String status;
 
         public String message;

@@ -17,13 +17,18 @@ This is a POC to have distributed lock system.
 4. The client can close the session, releasing all its locks.
 
 
+There is also a `mlock` and `munlock` operations to ask for multiple
+locks in an atomic way.
+
 The system use websocket between browser and the server, the
 bi-directional channel stay open during the session.
 
 The system support multiple servers.
 
-The websocket is hanlded by atmosphere and the data and
-communication between servers by redis.
+The websocket is hanlded by
+[Atmosphere](https://github.com/Atmosphere/atmosphere/wiki) and
+persistence and communication between servers using
+[Redis](http://redis.io).
 
 ## Lock sequence
 
@@ -34,7 +39,7 @@ Request and response are JSON encoded:
 
 - Request:
 
-        {'action': String, 'param': String, 'time': stamp}
+        {'action': String, 'params': String[], 'time': stamp}
 
 
 - Response: 
@@ -45,8 +50,10 @@ Implemented action:
 
 - connect sessionName
 - close
-- lock lockname
+- lock [lockname]
 - unlock lockname
+- mlock [lockname...]
+- munlock [lockname...]
    
 Status:
 

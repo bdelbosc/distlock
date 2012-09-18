@@ -42,10 +42,13 @@ public class DistLockPubSub extends JedisPubSub {
                     AtmosphereResource find = AtmosphereResourceFactory.getDefault().find(
                             uid);
                     if (find != null) {
-                        log.debug("Sending retry lock message to " + item);
+                        if (log.isDebugEnabled()) {
+                            log.debug("Nofify retry lock: " + lockname
+                                    + " to: " + item);
+                        }
                         find.getResponse().write(
                                 new WebSocketLock.Response(DistLock.MSG_RETRY,
-                                        "Lock " + lockname).toString());
+                                        lockname).toString());
                         jedis.srem(key, item);
                     } else {
                         log.debug("Not found ressource for retry lock " + item);
